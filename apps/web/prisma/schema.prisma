@@ -1,0 +1,388 @@
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// Account, User, Session, and VerificationToken based on: https://authjs.dev/reference/adapter/prisma
+model Account {
+  id                String   @id @default(cuid())
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  userId            String   @unique // `@unique` was added here. It's not part of the original schema. May remove this in the future
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?  @db.Text
+  access_token      String?  @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?  @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+// not in use. we only use jwt for sessions
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model User {
+  id            String    @id @default(cuid())
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  name          String?
+  email         String?   @unique
+  emailVerified DateTime?
+  image         String?
+  accounts      Account[]
+  sessions      Session[]
+
+  // additional fields
+  about                     String?
+  watchEmailsExpirationDate DateTime?
+  lastSyncedHistoryId       String?
+  completedOnboarding       Boolean   @default(false)
+  onboardingAnswers         Json?
+  behaviorProfile           Json?
+  lastLogin                 DateTime?
+  utms                      Json?
+
+  // settings
+  aiProvider            String?
+  aiModel               String?
+  openAIApiKey          String?
+  statsEmailFrequency   Frequency         @default(WEEKLY)
+  summaryEmailFrequency Frequency         @default(WEEKLY)
+  lastSummaryEmailAt    DateTime?
+  categorizeEmails      Boolean           @default(true)
+  coldEmailBlocker      ColdEmailSetting?
+  coldEmailPrompt       String?
+
+  // premium can be shared among multiple users
+  premiumId      String?
+  premium        Premium? @relation(name: "userPremium", fields: [premiumId], references: [id])
+  // only admin users can manage premium
+  premiumAdminId String?
+  premiumAdmin   Premium? @relation(fields: [premiumAdminId], references: [id])
+
+  promptHistory PromptHistory[]
+  labels        Label[]
+  rules         Rule[]
+  executedRules ExecutedRule[]
+  newsletters   Newsletter[]
+  coldEmails    ColdEmail[]
+  groups        Group[]
+}
+
+model Premium {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users  User[] @relation(name: "userPremium")
+  admins User[]
+
+  // lemon squeezy
+  lemonSqueezyRenewsAt           DateTime?
+  lemonSqueezyCustomerId         Int?
+  lemonSqueezySubscriptionId     Int?
+  lemonSqueezySubscriptionItemId Int?
+  lemonSqueezyOrderId            Int? // lifetime purchase is an order and not a subscription
+  lemonSqueezyProductId          Int?
+  lemonSqueezyVariantId          Int?
+  lemonLicenseKey                String?
+  lemonLicenseInstanceId         String?
+
+  tier PremiumTier?
+
+  // feature access
+  bulkUnsubscribeAccess  FeatureAccess?
+  coldEmailBlockerAccess FeatureAccess?
+  aiAutomationAccess     FeatureAccess?
+  emailAccountsAccess    Int?
+
+  // unsubscribe/ai credits
+  // if `unsubscribeMonth` not set to this month, set to current month
+  // reset `unsubscribeCredits` each time month is changed
+  unsubscribeMonth   Int? // 1-12
+  unsubscribeCredits Int?
+  aiMonth            Int? // 1-12
+  aiCredits          Int?
+}
+
+// not in use as it's only used for passwordless login
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+model PromptHistory {
+  id        String   @id @default(cuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  prompt    String
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Label {
+  id           String   @id @default(cuid())
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  gmailLabelId String
+  name         String
+  description  String? // used in prompts
+  enabled      Boolean  @default(true)
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([gmailLabelId, userId])
+  @@unique([name, userId])
+}
+
+model Rule {
+  id            String         @id @default(cuid())
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  name          String
+  instructions  String
+  actions       Action[]
+  automate      Boolean        @default(false) // if disabled, user must approve to execute
+  runOnThreads  Boolean        @default(false) // if disabled, only runs on individual emails
+  type          RuleType       @default(AI)
+  userId        String
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  executedRules ExecutedRule[]
+  groupId       String?        @unique
+  group         Group?         @relation(fields: [groupId], references: [id])
+
+  // automatically apply this rule if it matches a filter
+  // supports regex
+  from    String?
+  to      String?
+  subject String?
+  body    String?
+
+  @@unique([name, userId])
+}
+
+model Action {
+  id        String     @id @default(cuid())
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+  type      ActionType
+  ruleId    String
+  rule      Rule       @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+
+  // Optional static fields to use for this action
+  label   String?
+  subject String?
+  content String?
+  to      String?
+  cc      String?
+  bcc     String?
+
+  // If using AI generated fields - the prompt for each field
+  // An empty string means the field is AI generated, but there's no specific prompt for the field
+  // NULL means there field is not AI generated
+  labelPrompt   String?
+  subjectPrompt String?
+  contentPrompt String?
+  toPrompt      String?
+  ccPrompt      String?
+  bccPrompt     String?
+}
+
+// Rule/Action models represent the rules and actions that the AI can take.
+// ExecutedRule/ExecutedAction models represent the rules/actions that have been planned or executed by the AI.
+model ExecutedRule {
+  id        String             @id @default(cuid())
+  createdAt DateTime           @default(now())
+  updatedAt DateTime           @updatedAt
+  threadId  String
+  messageId String
+  status    ExecutedRuleStatus @default(APPLIED) // if APPLIED then the rule was executed
+  automated Boolean
+  reason    String?
+
+  // may be null if the rule was deleted
+  ruleId String?
+  rule   Rule?   @relation(fields: [ruleId], references: [id])
+
+  // storing user here in case rule was deleted
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  actionItems ExecutedAction[]
+
+  @@unique([userId, threadId, messageId], name: "unique_user_thread_message")
+}
+
+model ExecutedAction {
+  id             String       @id @default(cuid())
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  type           ActionType
+  executedRuleId String
+  executedRule   ExecutedRule @relation(fields: [executedRuleId], references: [id], onDelete: Cascade)
+
+  // optional extra fields to be used with the action
+  label   String?
+  subject String?
+  content String?
+  to      String?
+  cc      String?
+  bcc     String?
+}
+
+model Group {
+  id        String      @id @default(cuid())
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+  name      String
+  prompt    String?
+  items     GroupItem[]
+  userId    String
+  user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  rule      Rule?
+
+  @@unique([name, userId])
+}
+
+model GroupItem {
+  id        String        @id @default(cuid())
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+  groupId   String?
+  group     Group?        @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  type      GroupItemType
+  value     String // eg "@gmail.com", "matt@gmail.com", "Receipt from"
+
+  @@unique([groupId, type, value])
+}
+
+// Represents a sender (`email`) that a user can unsubscribe from,
+// or that our AI can mark as a cold email.
+// `Newsletter` is a bad name for this. Will rename this model in the future.
+model Newsletter {
+  id        String            @id @default(cuid())
+  createdAt DateTime          @default(now())
+  updatedAt DateTime          @updatedAt
+  email     String
+  status    NewsletterStatus?
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([email, userId])
+  @@index([userId, status])
+}
+
+model ColdEmail {
+  id        String           @id @default(cuid())
+  createdAt DateTime         @default(now())
+  updatedAt DateTime         @updatedAt
+  fromEmail String
+  messageId String?
+  threadId  String?
+  status    ColdEmailStatus?
+  reason    String?
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, fromEmail])
+  @@index([userId, status])
+}
+
+enum ActionType {
+  ARCHIVE
+  LABEL
+  REPLY
+  SEND_EMAIL
+  FORWARD
+  DRAFT_EMAIL
+  MARK_SPAM
+  // SUMMARIZE
+  // SNOOZE
+  // ADD_TO_DO
+  // CALL_WEBHOOK
+  // INTEGRATION // for example, add to Notion
+}
+
+enum Frequency {
+  NEVER
+  // DAILY
+  WEEKLY
+  // MONTHLY
+  // ANNUALLY
+}
+
+enum NewsletterStatus {
+  APPROVED
+  UNSUBSCRIBED
+  AUTO_ARCHIVED
+}
+
+enum ColdEmailStatus {
+  AI_LABELED_COLD
+  USER_REJECTED_COLD
+}
+
+enum ColdEmailSetting {
+  DISABLED
+  LIST
+  LABEL
+  ARCHIVE_AND_LABEL
+}
+
+enum PremiumTier {
+  BASIC_MONTHLY
+  BASIC_ANNUALLY
+  PRO_MONTHLY
+  PRO_ANNUALLY
+  BUSINESS_MONTHLY
+  BUSINESS_ANNUALLY
+  LIFETIME
+}
+
+enum FeatureAccess {
+  UNLOCKED
+  UNLOCKED_WITH_API_KEY
+  LOCKED
+}
+
+enum ExecutedRuleStatus {
+  APPLIED
+  REJECTED
+  PENDING
+  SKIPPED
+}
+
+enum RuleType {
+  AI
+  STATIC
+  GROUP
+}
+
+enum GroupItemType {
+  FROM
+  SUBJECT
+  BODY
+}

@@ -1,0 +1,49 @@
+version: "3.5"
+name: inbox-zero-services
+services:
+  db:
+    image: postgres
+    restart: always
+    container_name: inbox-zero
+    environment:
+      POSTGRES_USER: "postgres"
+      POSTGRES_DB: "inboxzero"
+      POSTGRES_PASSWORD: password
+    volumes:
+      - database-data:/var/lib/postgresql/data/
+    ports:
+      - 5432:5432
+    network_mode: host
+
+  redis:
+    image: redis
+    ports:
+      - 6380:6379
+    volumes:
+      - database-data:/data
+  serverless-redis-http:
+    ports:
+      - "8079:80"
+    image: hiett/serverless-redis-http:latest
+    env_file:
+      - ./apps/web/.env
+    environment:
+      SRH_MODE: env
+      SRH_TOKEN: ${UPSTASH_REDIS_TOKEN}
+      SRH_CONNECTION_STRING: "redis://redis:6379" # Using `redis` hostname since they're in the same Docker network.
+
+  web:
+    build:
+      context: .
+      dockerfile: ./docker/Dockerfile.web
+    env_file:
+      - ./.env
+    depends_on:
+      - db
+      # - redis
+    ports:
+      - 3000:3000
+    network_mode: host
+
+volumes:
+  database-data:
